@@ -21,12 +21,12 @@ class FFNNLM(nn.Module):
         return output
 
 class RNNLM(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, hidden_dim, dropout_prob=0.2, num_layers=1): # num_layers=1
+    def __init__(self, vocab_size, embedding_dim, hidden_dim, dropout_prob=0.2, num_layers=2): # num_layers=2
         super(RNNLM, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.embedding_norm = nn.LayerNorm(embedding_dim)
         self.dropout_emb = nn.Dropout(dropout_prob)
-        self.rnn = nn.RNN(embedding_dim, hidden_dim, batch_first=True, num_layers=num_layers) # num_layers=1
+        self.rnn = nn.RNN(embedding_dim, hidden_dim, batch_first=True, num_layers=num_layers, dropout = dropout_prob) # dropout in RNN layer
         self.rnn_output_norm = nn.LayerNorm(hidden_dim)
         self.dropout_rnn_output = nn.Dropout(dropout_prob)
         self.fc = nn.Linear(hidden_dim, vocab_size)
@@ -42,7 +42,7 @@ class RNNLM(nn.Module):
         output_logprobs = F.log_softmax(self.fc(output_last_step), dim=1)
         return output_logprobs, hidden
 
-    def init_hidden(self, batch_size, device):
+    def init_hidden(self, batch_size):
         return torch.zeros(self.num_layers, batch_size, self.hidden_dim).to(device) # Initialize hidden for num_layers
 
 class LSTMLM(nn.Module):
@@ -51,7 +51,7 @@ class LSTMLM(nn.Module):
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.embedding_norm = nn.LayerNorm(embedding_dim)
         self.dropout_emb = nn.Dropout(dropout_prob)
-        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True, num_layers=num_layers) # num_layers=2
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True, num_layers=num_layers, dropout=dropout_prob) # dropout in LSTM layer
         self.lstm_output_norm = nn.LayerNorm(hidden_dim)
         self.dropout_lstm_output = nn.Dropout(dropout_prob)
         self.fc = nn.Linear(hidden_dim, vocab_size)
@@ -68,7 +68,7 @@ class LSTMLM(nn.Module):
         output_logprobs = F.log_softmax(self.fc(output_last_step), dim=1)
         return output_logprobs, hidden
 
-    def init_hidden(self, batch_size, device):
+    def init_hidden(self, batch_size):
         return (torch.zeros(self.num_layers, batch_size, self.hidden_dim).to(device), # Initialize hidden for num_layers
                 torch.zeros(self.num_layers, batch_size, self.hidden_dim).to(device)) # Initialize cell state for num_layers
 
@@ -84,14 +84,14 @@ if __name__ == '__main__':
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     ffnn = FFNNLM(vocab_size, embedding_dim, context_size, hidden_dim, dropout_prob)
-    rnn = RNNLM(vocab_size, embedding_dim, hidden_dim, dropout_prob, num_layers=1)
+    rnn = RNNLM(vocab_size, embedding_dim, hidden_dim, dropout_prob, num_layers=2)
     lstm = LSTMLM(vocab_size, embedding_dim, hidden_dim, dropout_prob, num_layers)
 
     dummy_input_ffnn = torch.randint(0, vocab_size, (batch_size, context_size))
     dummy_input_rnn = torch.randint(0, vocab_size, (batch_size, seq_len))
     dummy_input_lstm = torch.randint(0, vocab_size, (batch_size, seq_len))
-    dummy_hidden_rnn = rnn.init_hidden(batch_size, device)
-    dummy_hidden_lstm = lstm.init_hidden(batch_size, device)
+    dummy_hidden_rnn = rnn.init_hidden(batch_size)
+    dummy_hidden_lstm = lstm.init_hidden(batch_size)
 
     output_ffnn = ffnn(dummy_input_ffnn)
     output_rnn, _ = rnn(dummy_input_rnn, dummy_hidden_rnn)
