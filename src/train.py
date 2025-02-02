@@ -322,7 +322,9 @@ def plot_loss_curves(train_losses, val_losses, model_name):
     plt.ylabel('Loss')
     plt.title(f'Training and Validation Loss for {model_name}')
     plt.legend()
-    plt.show()
+    plt.savefig(f'./models/{model_name}_loss_plot.png')
+    plt.close()
+    print(f"Training plot saved to ./models/{model_name}_loss_plot.png")
 
 def calculate_perplexity(model, data_loader, criterion, model_type):
     """Calculates perplexity using the best saved model."""
@@ -398,102 +400,96 @@ if __name__ == '__main__':
     parser.add_argument("--n_gram", type = int, default = 3, help = "N gram size for FFNN model")
     parser.add_argument("--min_freq", type = int, default = 1, help = "Minimum frequency for vocab")
     parser.add_argument("--lr", type = float, default = 0.001, help = "Learning rate")
-    parser.add_argument("--model_dir", type = str, default = "../models", help = "Directory to save models")
+    parser.add_argument("--model_dir", type = str, default = "./models", help = "Directory to save models")
     args = parser.parse_args()
 
     pride_prejudice_path = args.corpus_path
-
+    
     # --- Hyperparameter Tuning ---
-    n_trials_optuna = 5 # Reduced trials for example run, increase for thorough tuning
-
-    # FFNN 3-gram
-    ffnn_3gram_best_params, pp_vocab_ffnn_3gram, pp_word_to_index_ffnn_3gram = tune_hyperparameters(
-        pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=3, n_trials=n_trials_optuna)
-
-    # FFNN 5-gram
-    ffnn_5gram_best_params, pp_vocab_ffnn_5gram, pp_word_to_index_ffnn_5gram = tune_hyperparameters(
-        pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=5, n_trials=n_trials_optuna)
-
-    # RNN
-    rnn_best_params, pp_vocab_rnn, pp_word_to_index_rnn = tune_hyperparameters(
-        pride_prejudice_path, 'rnn', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna)
-
-    # LSTM
-    lstm_best_params, pp_vocab_lstm, pp_word_to_index_lstm = tune_hyperparameters(
-        pride_prejudice_path, 'lstm', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna)
-
-
-    # --- Re-train models with best hyperparameters and evaluate ---
-    epochs_final_train = args.epochs # Set epochs for final training
+    n_trials_optuna = 5  # Reduced trials for example run, increase for thorough tuning
     batch_size= args.batch_size
-    # --- FFNN 3-gram ---
-    pp_ffnn_3gram_model = FFNNLM(len(pp_vocab_ffnn_3gram), **ffnn_3gram_best_params, context_size=3-1)
-    pp_text = load_data(args.corpus_path)
-    pp_sentences = preprocess_text(pp_text)
-    pp_train_sentences, _, _ = create_train_val_test_split(pp_sentences) # Using full train split data for final training.
-    pp_ngrams_3_train = prepare_ngram_data(pp_train_sentences[: -1000], pp_word_to_index_ffnn_3gram, 3) # Example using full train data after tuning vocab
-    pp_ngrams_3_val = prepare_ngram_data(pp_train_sentences[-1000:-500], pp_word_to_index_ffnn_3gram, 3) # Example using full val data
-    pp_ngrams_3_test = prepare_ngram_data(pp_train_sentences[-500:], pp_word_to_index_ffnn_3gram, 3) # Example using full test data
 
-    train_dataset_ffnn_3gram_pp = NgramDataset(pp_ngrams_3_train)
-    val_dataset_ffnn_3gram_pp = NgramDataset(pp_ngrams_3_val)
-    test_dataset_ffnn_3gram_pp = NgramDataset(pp_ngrams_3_test)
-    train_loader_ffnn_3gram_pp = DataLoader(train_dataset_ffnn_3gram_pp, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2) # Optimized DataLoader
-    val_loader_ffnn_3gram_pp = DataLoader(val_dataset_ffnn_3gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
-    test_loader_ffnn_3gram_pp = DataLoader(test_dataset_ffnn_3gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
+    if args.lm_type == 'ffnn':
+      ffnn_3gram_best_params, pp_vocab_ffnn_3gram, pp_word_to_index_ffnn_3gram = tune_hyperparameters(
+          pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=3, n_trials=n_trials_optuna)
+      # --- Re-train models with best hyperparameters and evaluate ---
+      epochs_final_train = args.epochs # Set epochs for final training
+      # --- FFNN 3-gram ---
+      pp_ffnn_3gram_model = FFNNLM(len(pp_vocab_ffnn_3gram), ffnn_3gram_best_params['embedding_dim'], 3-1, ffnn_3gram_best_params['hidden_dim'], dropout_prob=ffnn_3gram_best_params['dropout_prob'])
+      pp_text = load_data(args.corpus_path)
+      pp_sentences = preprocess_text(pp_text)
+      pp_train_sentences, _, _ = create_train_val_test_split(pp_sentences) # Using full train split data for final training.
+      pp_ngrams_3_train = prepare_ngram_data(pp_train_sentences[: -1000], pp_word_to_index_ffnn_3gram, 3) # Example using full train data after tuning vocab
+      pp_ngrams_3_val = prepare_ngram_data(pp_train_sentences[-1000:-500], pp_word_to_index_ffnn_3gram, 3) # Example using full val data
+      pp_ngrams_3_test = prepare_ngram_data(pp_train_sentences[-500:], pp_word_to_index_ffnn_3gram, 3) # Example using full test data
 
-    trained_pp_ffnn_3gram_model = train_model(pp_ffnn_3gram_model, train_loader_ffnn_3gram_pp, val_loader_ffnn_3gram_pp, epochs_final_train, model_type='ffnn', model_name='ffnn_3gram', learning_rate=ffnn_3gram_best_params['learning_rate'], patience=3)
-    pp_test_perplexity_ffnn_3gram = calculate_perplexity(trained_pp_ffnn_3gram_model, test_loader_ffnn_3gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn')
-    print(f"Pride & Prejudice FFNN (3-gram) - Test Perplexity: {pp_test_perplexity_ffnn_3gram:.4f}")
+      train_dataset_ffnn_3gram_pp = NgramDataset(pp_ngrams_3_train)
+      val_dataset_ffnn_3gram_pp = NgramDataset(pp_ngrams_3_val)
+      test_dataset_ffnn_3gram_pp = NgramDataset(pp_ngrams_3_test)
+      train_loader_ffnn_3gram_pp = DataLoader(train_dataset_ffnn_3gram_pp, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2) # Optimized DataLoader
+      val_loader_ffnn_3gram_pp = DataLoader(val_dataset_ffnn_3gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
+      test_loader_ffnn_3gram_pp = DataLoader(test_dataset_ffnn_3gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
 
-    # --- FFNN 5-gram ---
-    pp_ffnn_5gram_model = FFNNLM(len(pp_vocab_ffnn_5gram), **ffnn_5gram_best_params, context_size=5-1)
-    pp_ngrams_5_train = prepare_ngram_data(preprocess_text(load_data(pride_prejudice_path))[: -1000], pp_word_to_index_ffnn_5gram, 5) # Example using full train data after tuning vocab
-    pp_ngrams_5_val = prepare_ngram_data(preprocess_text(load_data(pride_prejudice_path))[-1000:-500], pp_word_to_index_ffnn_5gram, 5) # Example using full val data
-    pp_ngrams_5_test = prepare_ngram_data(preprocess_text(load_data(pride_prejudice_path))[-500:], pp_word_to_index_ffnn_5gram, 5) # Example using full test data
-    train_dataset_ffnn_5gram_pp = NgramDataset(pp_ngrams_5_train)
-    val_dataset_ffnn_5gram_pp = NgramDataset(pp_ngrams_5_val)
-    test_dataset_ffnn_5gram_pp = NgramDataset(pp_ngrams_5_test)
-    train_loader_ffnn_5gram_pp = DataLoader(train_dataset_ffnn_5gram_pp, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2) # Optimized DataLoader
-    val_loader_ffnn_5gram_pp = DataLoader(val_dataset_ffnn_5gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
-    test_loader_ffnn_5gram_pp = DataLoader(test_dataset_ffnn_5gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
-    trained_pp_ffnn_5gram_model = train_model(pp_ffnn_5gram_model, train_loader_ffnn_5gram_pp, val_loader_ffnn_5gram_pp, epochs_final_train, model_type='ffnn', model_name='ffnn_5gram', learning_rate=ffnn_5gram_best_params['learning_rate'], patience=3)
-    pp_test_perplexity_ffnn_5gram = calculate_perplexity(trained_pp_ffnn_5gram_model, test_loader_ffnn_5gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn')
-    print(f"Pride & Prejudice FFNN (5-gram) - Test Perplexity: {pp_test_perplexity_ffnn_5gram:.4f}")
+      trained_pp_ffnn_3gram_model = train_model(pp_ffnn_3gram_model, train_loader_ffnn_3gram_pp, val_loader_ffnn_3gram_pp, epochs_final_train, model_type='ffnn', model_name='ffnn_3gram', learning_rate=ffnn_3gram_best_params['learning_rate'], patience=3)
+      pp_test_perplexity_ffnn_3gram = calculate_perplexity(trained_pp_ffnn_3gram_model, test_loader_ffnn_3gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn')
+      print(f"Pride & Prejudice FFNN (3-gram) - Test Perplexity: {pp_test_perplexity_ffnn_3gram:.4f}")
+      plot_loss_curves(trained_pp_ffnn_3gram_model.train_losses, trained_pp_ffnn_3gram_model.val_losses, 'ffnn_3gram', args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
+      print(f"FFNN (3-gram) best params {ffnn_3gram_best_params}")
 
 
-    # --- RNN ---
-    pp_rnn_model = RNNLM(len(pp_vocab_rnn), **rnn_best_params)
-    pp_rnn_sequences_train = prepare_rnn_data(preprocess_text(load_data(pride_prejudice_path))[: -1000], pp_word_to_index_rnn)
-    pp_rnn_sequences_val = prepare_rnn_data(preprocess_text(load_data(pride_prejudice_path))[-1000:-500], pp_word_to_index_rnn)
-    pp_rnn_sequences_test = prepare_rnn_data(preprocess_text(load_data(pride_prejudice_path))[-500:], pp_word_to_index_rnn)
-    train_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_train)
-    val_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_val)
-    test_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_test)
-    train_loader_rnn_pp = DataLoader(train_dataset_rnn_pp, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-    val_loader_rnn_pp = DataLoader(val_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-    test_loader_rnn_pp = DataLoader(test_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-    trained_pp_rnn_model = train_model(pp_rnn_model, train_loader_rnn_pp, val_loader_rnn_pp, epochs_final_train, model_type='rnn', model_name='rnn', learning_rate=rnn_best_params['learning_rate'], patience=3)
-    pp_test_perplexity_rnn = calculate_perplexity(trained_pp_rnn_model, test_loader_rnn_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='rnn')
-    print(f"Pride & Prejudice RNN - Test Perplexity: {pp_test_perplexity_rnn:.4f}")
 
-
-    # --- LSTM ---
-    pp_lstm_model = LSTMLM(len(pp_vocab_lstm), **lstm_best_params)
-    pp_rnn_sequences_train = prepare_rnn_data(preprocess_text(load_data(pride_prejudice_path))[: -1000], pp_word_to_index_lstm)
-    pp_rnn_sequences_val = prepare_rnn_data(preprocess_text(load_data(pride_prejudice_path))[-1000:-500], pp_word_to_index_lstm)
-    pp_rnn_sequences_test = prepare_rnn_data(preprocess_text(load_data(pride_prejudice_path))[-500:], pp_word_to_index_lstm)
-    train_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_train)
-    val_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_val)
-    test_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_test)
-    train_loader_lstm_pp = DataLoader(train_dataset_lstm_pp, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-    val_loader_lstm_pp = DataLoader(val_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-    test_loader_lstm_pp = DataLoader(test_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-    trained_pp_lstm_model = train_model(pp_lstm_model, train_loader_lstm_pp, val_loader_lstm_pp, epochs_final_train, model_type='lstm', model_name='lstm', learning_rate=lstm_best_params['learning_rate'], patience=3)
-    pp_test_perplexity_lstm = calculate_perplexity(trained_pp_lstm_model, test_loader_lstm_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='lstm')
-    print(f"Pride & Prejudice LSTM - Test Perplexity: {pp_test_perplexity_lstm:.4f}")
+    elif args.lm_type == 'rnn':
+      rnn_best_params, pp_vocab_rnn, pp_word_to_index_rnn = tune_hyperparameters(
+          pride_prejudice_path, 'rnn', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna)
+      # --- RNN ---
+      pp_rnn_model = RNNLM(len(pp_vocab_rnn), rnn_best_params['embedding_dim'], rnn_best_params['hidden_dim'], dropout_prob=rnn_best_params['dropout_prob'], num_layers = rnn_best_params['num_rnn_layers'] if 'num_rnn_layers' in rnn_best_params else 2)
+      pp_text = load_data(args.corpus_path)
+      pp_sentences = preprocess_text(pp_text)
+      pp_train_sentences, _, _ = create_train_val_test_split(pp_sentences)
+      pp_rnn_sequences_train = prepare_rnn_data(pp_train_sentences[: -1000], pp_word_to_index_rnn)
+      pp_rnn_sequences_val = prepare_rnn_data(pp_train_sentences[-1000:-500], pp_word_to_index_rnn)
+      pp_rnn_sequences_test = prepare_rnn_data(pp_train_sentences[-500:], pp_word_to_index_rnn)
+      train_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_train)
+      val_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_val)
+      test_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_test)
+      train_loader_rnn_pp = DataLoader(train_dataset_rnn_pp, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
+      val_loader_rnn_pp = DataLoader(val_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
+      test_loader_rnn_pp = DataLoader(test_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
+      trained_pp_rnn_model = train_model(pp_rnn_model, train_loader_rnn_pp, val_loader_rnn_pp, epochs_final_train, model_type='rnn', model_name='rnn', learning_rate=rnn_best_params['learning_rate'], patience=3)
+      pp_test_perplexity_rnn = calculate_perplexity(trained_pp_rnn_model, test_loader_rnn_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='rnn')
+      print(f"Pride & Prejudice RNN - Test Perplexity: {pp_test_perplexity_rnn:.4f}")
+      plot_loss_curves(trained_pp_rnn_model.train_losses, trained_pp_rnn_model.val_losses, 'rnn', args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
+      print(f"RNN best params {rnn_best_params}")
+    elif args.lm_type == 'lstm':
+        lstm_best_params, pp_vocab_lstm, pp_word_to_index_lstm = tune_hyperparameters(
+            pride_prejudice_path, 'lstm', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna)
+        # --- LSTM ---
+        pp_lstm_model = LSTMLM(len(pp_vocab_lstm), lstm_best_params['embedding_dim'], lstm_best_params['hidden_dim'], dropout_prob=lstm_best_params['dropout_prob'], num_layers=lstm_best_params['num_rnn_layers'] if 'num_rnn_layers' in lstm_best_params else 2)
+        pp_text = load_data(args.corpus_path)
+        pp_sentences = preprocess_text(pp_text)
+        pp_train_sentences, _, _ = create_train_val_test_split(pp_sentences)
+        pp_rnn_sequences_train = prepare_rnn_data(pp_train_sentences[: -1000], pp_word_to_index_lstm)
+        pp_rnn_sequences_val = prepare_rnn_data(pp_train_sentences[-1000:-500], pp_word_to_index_lstm)
+        pp_rnn_sequences_test = prepare_rnn_data(pp_train_sentences[-500:], pp_word_to_index_lstm)
+        train_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_train)
+        val_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_val)
+        test_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_test)
+        train_loader_lstm_pp = DataLoader(train_dataset_lstm_pp, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
+        val_loader_lstm_pp = DataLoader(val_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
+        test_loader_lstm_pp = DataLoader(test_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
+        trained_pp_lstm_model = train_model(pp_lstm_model, train_loader_lstm_pp, val_loader_lstm_pp, epochs_final_train, model_type='lstm', model_name='lstm', learning_rate=lstm_best_params['learning_rate'], patience=3)
+        pp_test_perplexity_lstm = calculate_perplexity(trained_pp_lstm_model, test_loader_lstm_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='lstm')
+        print(f"Pride & Prejudice LSTM - Test Perplexity: {pp_test_perplexity_lstm:.4f}")
+        plot_loss_curves(trained_pp_lstm_model.train_losses, trained_pp_lstm_model.val_losses, 'lstm', args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
+        print(f"LSTM best params {lstm_best_params}")
 
 
     print("="*50) # Separator
     print("Remember to train and evaluate Ulysses models as well, following the same structure!")
     print("="*50)
+    if args.lm_type == 'ffnn':
+      print(f"FFNN (3-gram) best params {ffnn_3gram_best_params}")
+    elif args.lm_type == 'rnn':
+        print(f"RNN best params {rnn_best_params}")
+    elif args.lm_type == 'lstm':
+      print(f"LSTM best params {lstm_best_params}")
