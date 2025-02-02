@@ -122,7 +122,7 @@ def main():
   parser.add_argument("--seq_len", type = int, default = 20, help = "Sequence Length for RNN and LSTM")
   parser.add_argument("--n_gram", type = int, default = 3, help = "N gram size for FFNN model")
   parser.add_argument("--min_freq", type = int, default = 1, help = "Minimum frequency for vocab")
-  parser.add_argument("--model_dir", type = str, default = "../models", help = "Directory to save models")
+  parser.add_argument("--model_dir", type = str, default = "./models", help = "Directory to save models")
   args = parser.parse_args()
   device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
   print("Device: ", device)

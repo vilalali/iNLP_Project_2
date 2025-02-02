@@ -395,7 +395,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_gram", type = int, default = 3, help = "N gram size for FFNN model")
     parser.add_argument("--min_freq", type = int, default = 1, help = "Minimum frequency for vocab")
     parser.add_argument("--lr", type = float, default = 0.001, help = "Learning rate")
-    parser.add_argument("--model_dir", type = str, default = "../models", help = "Directory to save models")
+    parser.add_argument("--model_dir", type = str, default = "./models", help = "Directory to save models")
     args = parser.parse_args()
 
     pride_prejudice_path = args.corpus_path
