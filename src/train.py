@@ -375,7 +375,7 @@ def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_c
         else:
             raise ValueError("Invalid model_type")
 
-        trained_model = train_model(model, train_loader, val_loader, epochs=5, learning_rate=learning_rate, model_type=model_type, model_name=f'tune_{model_type}') # Reduced epochs for tuning
+        trained_model = train_model(model, train_loader, val_loader, epochs=args.epochs, learning_rate=learning_rate, model_type=model_type, model_name=f'tune_{model_type}') # Reduced epochs for tuning
         val_loss = evaluate_loss(trained_model, val_loader, nn.NLLLoss(ignore_index=0), model_type, device)
         return val_loss
 
@@ -399,7 +399,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_gram", type = int, default = 3, help = "N gram size for FFNN model")
     parser.add_argument("--min_freq", type = int, default = 1, help = "Minimum frequency for vocab")
     parser.add_argument("--lr", type = float, default = 0.001, help = "Learning rate")
-    parser.add_argument("--model_dir", type = str, default = "../models", help = "Directory to save models")
+    parser.add_argument("--model_dir", type = str, default = "./models", help = "Directory to save models")
     args = parser.parse_args()
 
     pride_prejudice_path = args.corpus_path
@@ -407,13 +407,13 @@ if __name__ == '__main__':
 
     # --- Hyperparameter Tuning ---
     n_trials_optuna = 5 # Reduced trials for example run, increase for thorough tuning
-    epochs_final_train = args.epochs
+    epochs_final_train = 50
 
     if args.lm_type == 'ffnn':
       ffnn_3gram_best_params, pp_vocab_ffnn_3gram, pp_word_to_index_ffnn_3gram = tune_hyperparameters(
-          pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=3, n_trials=n_trials_optuna, seed = SEED)
+          pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=args.n_gram, n_trials=n_trials_optuna, seed = SEED)
       # --- Re-train models with best hyperparameters and evaluate ---
-      # --- FFNN 3-gram ---
+      # --- FFNN 3-gram and 5-gram---
       pp_ffnn_3gram_model = FFNNLM(len(pp_vocab_ffnn_3gram), ffnn_3gram_best_params['embedding_dim'], 3-1, ffnn_3gram_best_params['hidden_dim'], dropout_prob=ffnn_3gram_best_params['dropout_prob'])
       pp_text = load_data(args.corpus_path)
       pp_sentences = preprocess_text(pp_text)
@@ -429,13 +429,13 @@ if __name__ == '__main__':
       val_loader_ffnn_3gram_pp = DataLoader(val_dataset_ffnn_3gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
       test_loader_ffnn_3gram_pp = DataLoader(test_dataset_ffnn_3gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
 
-      trained_pp_ffnn_3gram_model = train_model(pp_ffnn_3gram_model, train_loader_ffnn_3gram_pp, val_loader_ffnn_3gram_pp, epochs_final_train, model_type='ffnn', model_name='ffnn_3gram', learning_rate=ffnn_3gram_best_params['learning_rate'], patience=3)
+      trained_pp_ffnn_3gram_model = train_model(pp_ffnn_3gram_model, train_loader_ffnn_3gram_pp, val_loader_ffnn_3gram_pp, epochs_final_train, model_type='ffnn', model_name = f"ffnn_{args.n_gram}-gram", learning_rate=ffnn_3gram_best_params['learning_rate'], patience=3)
       pp_test_perplexity_ffnn_3gram = calculate_perplexity(trained_pp_ffnn_3gram_model, test_loader_ffnn_3gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn', device=device)
-      print(f"Pride & Prejudice FFNN (3-gram) - Test Perplexity: {pp_test_perplexity_ffnn_3gram:.4f}")
-      plot_loss_curves(trained_pp_ffnn_3gram_model.train_losses, trained_pp_ffnn_3gram_model.val_losses, 'ffnn_3gram', args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
+      print(f"Pride & Prejudice FFNN ({args.n_gram}-gram) - Test Perplexity: {pp_test_perplexity_ffnn_3gram:.4f}")
+      plot_loss_curves(trained_pp_ffnn_3gram_model.train_losses, trained_pp_ffnn_3gram_model.val_losses, f"ffnn_{args.n_gram}-gram", args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
       pp_train_perplexity_ffnn_3gram = calculate_perplexity(trained_pp_ffnn_3gram_model, train_loader_ffnn_3gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn', device=device)
-      print(f"Pride & Prejudice FFNN (3-gram) - Train Perplexity: {pp_train_perplexity_ffnn_3gram:.4f}")
-      print(f"FFNN (3-gram) best params {ffnn_3gram_best_params}")
+      print(f"Pride & Prejudice FFNN ({args.n_gram}-gram) - Train Perplexity: {pp_train_perplexity_ffnn_3gram:.4f}")
+      print(f"FFNN ({args.n_gram}-gram) best params {ffnn_3gram_best_params}")
 
 
     elif args.lm_type == 'rnn':
