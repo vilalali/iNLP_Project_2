@@ -279,8 +279,9 @@ def save_model(model, model_path, vocab, word_to_index, model_type, best_params,
         'n_gram': n_gram
     }
     torch.save(state, model_path)
-def train_model(model, train_loader, val_loader, epochs, learning_rate, model_type, model_name, patience=5, device=None, multi_gpu=False, vocab=None, word_to_index=None, best_params = None, n_gram = None, args = None, train_sentences = None, test_sentences = None):
-    """Generic training function for FFNN, RNN, and LSTM models with early stopping."""
+
+"""Generic training function for FFNN, RNN, and LSTM models with early stopping."""
+def train_model(model, train_loader, val_loader, epochs, learning_rate, model_type, model_name, patience=7, device=None, multi_gpu=False, vocab=None, word_to_index=None, best_params = None, n_gram = None, args = None, train_sentences = None, test_sentences = None):
     criterion = nn.NLLLoss(ignore_index=0, reduction = 'mean')
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
