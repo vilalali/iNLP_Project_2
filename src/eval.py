@@ -173,3 +173,30 @@ def main():
 
 if __name__ == '__main__':
     main()
+    
+    
+def calculate_and_save_perplexities(model, data_loader, criterion, model_type, device, filename, multi_gpu = False, collate_fn=None):
+    """Calculates per-sentence perplexities and saves to CSV."""
+    losses, perplexities = evaluate_loss_per_sentence(model, data_loader, criterion, model_type, device, multi_gpu)
+
+    with open(filename, mode='w', newline='') as file:
+        writer = csv.writer(file)
+        writer.writerow(["Sentence Index", "Loss", "Perplexity"])
+        for i, (loss, perplexity) in enumerate(zip(losses, perplexities)):
+            writer.writerow([i, f"{loss:.4f}", f"{perplexity:.4f}"])
+    print(f"Per-sentence perplexities saved to {filename}")
+
+def calculate_average_perplexity(model, data_loader, criterion, model_type, device, multi_gpu=False):
+    """Calculates average perplexity for the entire dataloader."""
+    losses, perplexities = evaluate_loss_per_sentence(model, data_loader, criterion, model_type, device, multi_gpu)
+    if perplexities:
+        return np.mean(perplexities)
+    else:
+        return float('inf')  # return inf for empty dataloader
+    
+
+
+        calculate_and_save_perplexities(trained_pp_ffnn_N_gram_model, test_loader_ffnn_N_gram_pp, criterion_per_sentence, model_type='ffnn', device=device, filename=os.path.join(args.model_dir, f'ffnn_{args.n_gram}_test_perplexities.csv'), multi_gpu = multi_gpu)
+        calculate_and_save_perplexities(trained_pp_ffnn_N_gram_model, train_loader_ffnn_N_gram_pp, criterion_per_sentence, model_type='ffnn', device=device, filename=os.path.join(args.model_dir, f'ffnn_{args.n_gram}_train_perplexities.csv'), multi_gpu = multi_gpu)    
+        calculate_and_save_perplexities(trained_pp_rnn_model, test_loader_rnn_pp, criterion_per_sentence, model_type='rnn', device=device, filename=os.path.join(args.model_dir, 'rnn_test_perplexities.csv'), multi_gpu=multi_gpu, collate_fn = collate_fn_rnn_loss)
+        calculate_and_save_perplexities(trained_pp_rnn_model, train_loader_rnn_pp, criterion_per_sentence, model_type='rnn', device=device, filename=os.path.join(args.model_dir, 'rnn_train_perplexities.csv'), multi_gpu=multi_gpu, collate_fn=collate_fn_rnn_loss)        

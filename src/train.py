@@ -12,6 +12,8 @@ import matplotlib.pyplot as plt
 import os
 import argparse
 import optuna  # Import Optuna for hyperparameter tuning
+import csv
+from tokenizer import Tokenizer #Import the tokenizer
 
 # --- 1. Setup and Data Loading ---
 SEED = 49
@@ -24,6 +26,7 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 n_gpus = torch.cuda.device_count()
 print(f"Using device: {device}, Number of GPUs available: {n_gpus}")
 multi_gpu = n_gpus > 1
+tokenizer = Tokenizer() # Instantiate the tokenizer
 
 def load_data(file_path):
     """Loads text data from a file."""
@@ -33,25 +36,23 @@ def load_data(file_path):
 
 def preprocess_text(text):
     """Tokenizes text into sentences and words, lowercasing words."""
-    sentences = sent_tokenize(text)
-    tokenized_sentences = [word_tokenize(s.lower()) for s in sentences]
-    return tokenized_sentences
+    sentences = tokenizer.tokenize_content(text, remove_puctuations = True)
+    return sentences
 
-def create_train_test_split(sentences, val_size=500, test_size=500, seed = SEED):
+def create_train_test_split(sentences, test_size=1000, seed = SEED):
     """Splits sentences into training, validation, and test sets."""
     random.seed(seed)
     random.shuffle(sentences)
     test_sentences = sentences[:test_size]
-    val_sentences = sentences[test_size:test_size+val_size]
-    train_sentences = sentences[test_size+val_size:]
-    return train_sentences, val_sentences, test_sentences
+    train_sentences = sentences[test_size:]
+    return train_sentences, test_sentences
 
 def build_vocabulary(sentences, min_freq=1):
     """Builds vocabulary from sentences."""
     word_counts = Counter()
     for sentence in sentences:
         word_counts.update(sentence)
-
+    
     vocab = ['<PAD>', '<UNK>'] # PAD token at index 0
     for word, count in word_counts.items():
         if count >= min_freq:
@@ -192,8 +193,14 @@ def collate_fn_rnn(batch):
     padded_input_seqs = pad_sequence([torch.tensor(seq, dtype=torch.long) for seq in input_seqs], batch_first=True, padding_value=0)
     targets = torch.stack([torch.tensor(target, dtype=torch.long) for target in targets])
     return padded_input_seqs, targets
+def collate_fn_rnn_loss(batch):
+    """Pads sequences within a batch and stacks targets."""
+    input_seqs, targets = zip(*batch)
+    padded_input_seqs = pad_sequence([torch.tensor(seq, dtype=torch.long) for seq in input_seqs], batch_first=True, padding_value=0)
+    targets = torch.stack([torch.tensor(target, dtype=torch.long) for target in targets])
+    return padded_input_seqs, targets
 
-def evaluate_loss(model, data_loader, criterion, model_type, device):
+def evaluate_loss(model, data_loader, criterion, model_type, device, multi_gpu=False):
     """Evaluates the model on the given data loader and returns the average loss."""
     model.eval()
     total_loss = 0
@@ -224,10 +231,57 @@ def evaluate_loss(model, data_loader, criterion, model_type, device):
             word_count += targets.size(0)
     avg_loss = total_loss / word_count if word_count > 0 else 0
     return avg_loss
+def evaluate_loss_per_sentence(model, data_loader, criterion, model_type, device, multi_gpu=False):
+    """Evaluates the model on the given data loader and returns sentence-wise loss and perplexity."""
+    model.eval()
+    all_losses = []
+    all_perplexities = []
+    with torch.no_grad():
+         for batch in data_loader:
+            if model_type == 'ffnn':
+                contexts, targets = batch
+                contexts = contexts.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
+                outputs = model(contexts)
+            elif model_type in ['rnn', 'lstm']:
+                input_seq_batch, targets = batch
+                input_seq_batch = input_seq_batch.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
+                if multi_gpu:
+                    hidden = model.module.init_hidden(input_seq_batch.size(0), device)
+                else:
+                   hidden = model.init_hidden(input_seq_batch.size(0), device)
+                outputs, _ = model(input_seq_batch, hidden)
+            else:
+                raise ValueError(f"Unsupported model_type: {model_type}")
+            
+            if multi_gpu:
+                losses = criterion(outputs, targets).mean(dim=0).cpu().numpy() # Average loss over batch dimension for multi-GPU
+            else:
+                losses = criterion(outputs, targets).cpu().numpy()
+            
+            # Ensure losses is always a 1D array
+            if losses.ndim == 0:  # handle cases if loss is a single scalar
+               losses = np.array([losses])
+            perplexities = np.exp(losses)
+            all_losses.extend(losses)
+            all_perplexities.extend(perplexities)
+    return all_losses, all_perplexities
 
-def train_model(model, train_loader, val_loader, epochs, learning_rate, model_type, model_name, patience=3):
+# Separate save_model function (to be placed outside of train_model):
+def save_model(model, model_path, vocab, word_to_index, model_type, best_params, n_gram=None):
+    state = {
+        'model_state_dict': model.state_dict(),
+        'vocab': vocab,
+        'word_to_index': word_to_index,
+        'model_type': model_type,
+        'best_params' : best_params,
+        'n_gram': n_gram
+    }
+    torch.save(state, model_path)
+def train_model(model, train_loader, val_loader, epochs, learning_rate, model_type, model_name, patience=5, device=None, multi_gpu=False, vocab=None, word_to_index=None, best_params = None, n_gram = None, args = None, train_sentences = None, test_sentences = None):
     """Generic training function for FFNN, RNN, and LSTM models with early stopping."""
-    criterion = nn.NLLLoss(ignore_index=0)
+    criterion = nn.NLLLoss(ignore_index=0, reduction = 'mean')
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min')
     model.to(device)
@@ -237,7 +291,7 @@ def train_model(model, train_loader, val_loader, epochs, learning_rate, model_ty
     train_losses = []
     val_losses = []
     best_val_loss = float('inf')
-    path_to_best_model = f'best_{model_name}_model.pth'
+    path_to_best_model = os.path.join(args.model_dir, f'best_{model_name}_model.pth')
     epoch_batches_print = len(train_loader) // 5 if len(train_loader) > 5 else 1
     epochs_no_improve = 0
 
@@ -259,7 +313,7 @@ def train_model(model, train_loader, val_loader, epochs, learning_rate, model_ty
                 # Correct hidden state initialization for DataParallel
                 if multi_gpu:
                     # Get sub-batch size for current GPU (replica)
-                    sub_batch_size = input_seq_batch.size(0) // n_gpus
+                    sub_batch_size = input_seq_batch.size(0) // (torch.cuda.device_count() if torch.cuda.is_available() else 1 ) # Get GPU count for multi-gpu
                     # Initialize hidden state with sub-batch size
                     hidden = model.module.init_hidden(sub_batch_size, device)
                 else:
@@ -283,7 +337,7 @@ def train_model(model, train_loader, val_loader, epochs, learning_rate, model_ty
         avg_train_loss = total_loss / len(train_loader)
         train_losses.append(avg_train_loss)
 
-        avg_val_loss = evaluate_loss(model, val_loader, criterion, model_type, device)
+        avg_val_loss = evaluate_loss(model, val_loader, criterion, model_type, device, multi_gpu=multi_gpu)
         val_losses.append(avg_val_loss)
         scheduler.step(avg_val_loss)
 
@@ -306,6 +360,74 @@ def train_model(model, train_loader, val_loader, epochs, learning_rate, model_ty
     # Store the train and val losses in the model class
     model.train_losses = train_losses
     model.val_losses = val_losses
+    
+    # --- Perplexity Calculation and Reporting ---
+    
+    # Calculate and save perplexity for the training set
+    train_losses, train_perplexities = evaluate_loss_per_sentence(model, train_loader, nn.NLLLoss(ignore_index=0, reduction = 'none'), model_type, device, multi_gpu=multi_gpu)
+    avg_train_perplexity = np.mean(train_perplexities)
+
+    train_output_dir = os.path.join(args.output_dir, "train_perplexity")
+    os.makedirs(train_output_dir, exist_ok=True)  # Create the output directory if it doesn't exist
+
+    train_output_path = os.path.join(train_output_dir, f"{args.student_id}_{model_name}_Perplexity_Train_{os.path.basename(args.corpus_path).split('.')[0]}.csv")
+    
+    # Save the training sentences to a file
+    train_sentences_path = os.path.join(train_output_dir, f"{args.student_id}_train_sentences_{os.path.basename(args.corpus_path).split('.')[0]}.txt")
+    with open(train_sentences_path, 'w', encoding = 'utf-8') as f:
+       for sent in train_sentences:
+           f.write(f"{' '.join(sent)}\n") # Join tokens
+    print(f"Training sentences saved to: {train_sentences_path}")
+
+    with open(train_output_path, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile, delimiter='\t') # Changed the delimiter to tab
+        writer.writerow([f"Train Average Perplexity", f"{avg_train_perplexity:.16f}"])
+        for sent, perp in zip(train_sentences, train_perplexities):
+           writer.writerow([ ' '.join(sent), f"{perp:.16f}"]) # Join tokens before writing into csv
+
+    print(f"Train Perplexity Saved to: {train_output_path}")
+    
+    # Calculate and save perplexity for the test set
+    # Prepare test data loader
+    if model_type == 'ffnn':
+        test_data = prepare_ngram_data(test_sentences, word_to_index, n_gram)
+        test_dataset = NgramDataset(test_data)
+        test_loader = DataLoader(test_dataset, batch_size = args.batch_size, pin_memory=True, num_workers=2)
+    elif model_type in ['rnn','lstm']:
+        test_data = prepare_rnn_data(test_sentences, word_to_index)
+        test_dataset = RNNSequenceDataset(test_data)
+        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2)
+
+    test_losses, test_perplexities = evaluate_loss_per_sentence(model, test_loader, nn.NLLLoss(ignore_index=0, reduction = 'none'), model_type, device, multi_gpu=multi_gpu)
+    avg_test_perplexity = np.mean(test_perplexities)
+
+    test_output_dir = os.path.join(args.output_dir, "test_perplexity")
+    os.makedirs(test_output_dir, exist_ok=True)
+    
+    test_output_path = os.path.join(test_output_dir, f"{args.student_id}_{model_name}_Perplexity_Test_{os.path.basename(args.corpus_path).split('.')[0]}.csv")
+    
+    # Save test sentences to file
+    test_sentences_path = os.path.join(test_output_dir, f"{args.student_id}_test_sentences_{os.path.basename(args.corpus_path).split('.')[0]}.txt")
+    with open(test_sentences_path, 'w', encoding = 'utf-8') as f:
+        for sent in test_sentences:
+            f.write(f"{' '.join(sent)}\n") #Join Tokens
+    print(f"Test sentences saved to: {test_sentences_path}")
+
+    with open(test_output_path, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.writer(csvfile, delimiter='\t') # Changed the delimiter to tab
+        writer.writerow([f"Test Average Perplexity", f"{avg_test_perplexity:.16f}"])
+        for sent, perp in zip(test_sentences, test_perplexities):
+           writer.writerow([' '.join(sent), f"{perp:.16f}"]) #Join Tokens
+    
+    print(f"Test Perplexity Saved to: {test_output_path}")
+    
+
+    #After training save the model
+    save_path = os.path.join(args.model_dir, f'best_{model_name}_final_model.pth')
+    if model_type == 'ffnn':
+        save_model(model, save_path, vocab, word_to_index, model_type, best_params, n_gram)
+    else:
+        save_model(model, save_path, vocab, word_to_index, model_type, best_params)
 
     return model
 
@@ -325,18 +447,23 @@ def plot_loss_curves(train_losses, val_losses, model_name, model_dir, corpus_nam
     plt.close()
     print(f"Training plot saved to {plot_path}")
 
-def calculate_perplexity(model, data_loader, criterion, model_type, device):
+def calculate_perplexity(model, data_loader, criterion, model_type, device, multi_gpu=False):
     """Calculates perplexity using the best saved model."""
-    avg_loss = evaluate_loss(model, data_loader, criterion, model_type, device)
+    avg_loss = evaluate_loss(model, data_loader, criterion, model_type, device, multi_gpu)
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
     return perplexity
 
-def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_class, collate_fn=None, n_gram_size=None, n_trials=10, seed = SEED):
+def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_class, collate_fn=None, n_gram_size=None, n_trials=10, seed = SEED, args = None):
     """Tunes hyperparameters using Optuna."""
     pp_text = load_data(text_path)
     pp_sentences = preprocess_text(pp_text)
-    pp_train_sentences, pp_val_sentences, _ = create_train_test_split(pp_sentences, seed = seed)
+    pp_train_sentences, pp_test_sentences = create_train_test_split(pp_sentences, test_size = 1000, seed = seed)
+    pp_val_sentences = pp_train_sentences[:500]
+    pp_train_sentences = pp_train_sentences[500:]
     pp_vocab, pp_word_to_index, _ = build_vocabulary(pp_train_sentences)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    multi_gpu = torch.cuda.device_count() > 1
+
 
     def objective(trial):
         embedding_dim = trial.suggest_int('embedding_dim', 8, 64)
@@ -344,10 +471,11 @@ def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_c
         learning_rate = trial.suggest_float('learning_rate', 1e-4, 1e-1, log=True)
         dropout_prob = trial.suggest_float('dropout_prob', 0.1, 0.5)
         num_rnn_layers = trial.suggest_int('num_rnn_layers', 1, 3) if model_type in ['rnn', 'lstm'] else None
+        epochs_tune = 2 # Reduced epochs for tuning
 
         if model_type == 'ffnn':
             context_size = n_gram_size - 1
-            model = FFNNLM(len(pp_vocab), embedding_dim, context_size, hidden_dim, dropout_prob)
+            model = FFNNLM(len(pp_vocab), embedding_dim, context_size, hidden_dim, dropout_prob).to(device) # Move Model to device here
             train_data = data_preparation_func(pp_train_sentences, pp_word_to_index, n_gram_size)
             val_data = data_preparation_func(pp_val_sentences, pp_word_to_index, n_gram_size)
             train_dataset = dataset_class(train_data)
@@ -356,7 +484,7 @@ def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_c
             val_loader = DataLoader(val_dataset, batch_size=32, pin_memory=True, num_workers=2)
 
         elif model_type == 'rnn':
-            model = RNNLM(len(pp_vocab), embedding_dim, hidden_dim, dropout_prob, num_rnn_layers)
+            model = RNNLM(len(pp_vocab), embedding_dim, hidden_dim, dropout_prob, num_rnn_layers).to(device) # Move Model to device here
             train_data = data_preparation_func(pp_train_sentences, pp_word_to_index)
             val_data = data_preparation_func(pp_val_sentences, pp_word_to_index)
             train_dataset = dataset_class(train_data)
@@ -365,7 +493,7 @@ def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_c
             val_loader = DataLoader(val_dataset, batch_size=32, pin_memory=True, num_workers=2, collate_fn=collate_fn)
 
         elif model_type == 'lstm':
-            model = LSTMLM(len(pp_vocab), embedding_dim, hidden_dim, dropout_prob, num_rnn_layers)
+            model = LSTMLM(len(pp_vocab), embedding_dim, hidden_dim, dropout_prob, num_rnn_layers).to(device) # Move Model to device here
             train_data = data_preparation_func(pp_train_sentences, pp_word_to_index)
             val_data = data_preparation_func(pp_val_sentences, pp_word_to_index)
             train_dataset = dataset_class(train_data)
@@ -375,8 +503,8 @@ def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_c
         else:
             raise ValueError("Invalid model_type")
 
-        trained_model = train_model(model, train_loader, val_loader, epochs=args.epochs, learning_rate=learning_rate, model_type=model_type, model_name=f'tune_{model_type}') # Reduced epochs for tuning
-        val_loss = evaluate_loss(trained_model, val_loader, nn.NLLLoss(ignore_index=0), model_type, device)
+        trained_model = train_model(model, train_loader, val_loader, epochs=epochs_tune, learning_rate=learning_rate, model_type=model_type, model_name=f'tune_{model_type}', device=device, multi_gpu=multi_gpu, vocab=pp_vocab, word_to_index=pp_word_to_index, best_params = {'embedding_dim':embedding_dim, 'hidden_dim':hidden_dim, 'learning_rate':learning_rate, 'dropout_prob':dropout_prob, 'num_rnn_layers':num_rnn_layers} if model_type in ['rnn','lstm'] else {'embedding_dim':embedding_dim, 'hidden_dim':hidden_dim, 'learning_rate':learning_rate, 'dropout_prob':dropout_prob}, n_gram=n_gram_size if model_type == 'ffnn' else None, args = args, train_sentences = pp_train_sentences, test_sentences = pp_test_sentences) # Reduced epochs for tuning
+        val_loss = evaluate_loss(trained_model, val_loader, nn.NLLLoss(ignore_index=0), model_type, device, multi_gpu=multi_gpu)
         return val_loss
 
     study = optuna.create_study(direction='minimize')
@@ -400,9 +528,12 @@ if __name__ == '__main__':
     parser.add_argument("--min_freq", type = int, default = 1, help = "Minimum frequency for vocab")
     parser.add_argument("--lr", type = float, default = 0.001, help = "Learning rate")
     parser.add_argument("--model_dir", type = str, default = "./models", help = "Directory to save models")
+    parser.add_argument("--output_dir", type=str, default="./output", help = "Directory to save output files")
+    parser.add_argument("--student_id", type=str, required=True, help="Your student ID for file naming")
+
     args = parser.parse_args()
 
-    pride_prejudice_path = args.corpus_path
+    pride_prejudice_path = args.corpus_path     
     batch_size= args.batch_size
 
     # --- Hyperparameter Tuning ---
@@ -414,87 +545,81 @@ if __name__ == '__main__':
     # --- FFNN ---
     if args.lm_type == 'ffnn':
       ffnn_N_gram_best_params, pp_vocab_ffnn_N_gram_, pp_word_to_index_ffnn_N_gram_ = tune_hyperparameters(
-          pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=args.n_gram, n_trials=n_trials_optuna, seed = SEED)
-      pp_ffnn_N_gram_model = FFNNLM(len(pp_vocab_ffnn_N_gram_), ffnn_N_gram_best_params['embedding_dim'], 3-1, ffnn_N_gram_best_params['hidden_dim'], dropout_prob=ffnn_N_gram_best_params['dropout_prob'])
+          pride_prejudice_path, 'ffnn', prepare_ngram_data, NgramDataset, n_gram_size=args.n_gram, n_trials=n_trials_optuna, seed = SEED, args = args)
+      pp_ffnn_N_gram_model = FFNNLM(len(pp_vocab_ffnn_N_gram_), ffnn_N_gram_best_params['embedding_dim'], args.n_gram - 1, ffnn_N_gram_best_params['hidden_dim'], dropout_prob=ffnn_N_gram_best_params['dropout_prob']).to(device)
       pp_text = load_data(args.corpus_path)
       pp_sentences = preprocess_text(pp_text)
-      pp_train_sentences, pp_val_sentences, pp_test_sentences = create_train_test_split(pp_sentences, seed=SEED) # Using full train split data for final training.
-      pp_ngrams_3_train = prepare_ngram_data(pp_train_sentences[: -1000], pp_word_to_index_ffnn_N_gram_, 3) # Example using full train data after tuning vocab
-      pp_ngrams_3_val = prepare_ngram_data(pp_val_sentences, pp_word_to_index_ffnn_N_gram_, 3) # Example using full val data
-      pp_ngrams_3_test = prepare_ngram_data(pp_test_sentences, pp_word_to_index_ffnn_N_gram_, 3) # Example using full test data
+      pp_train_sentences, pp_test_sentences = create_train_test_split(pp_sentences, test_size = 1000, seed=SEED)
+      pp_val_sentences = pp_train_sentences[:500]
+      pp_train_sentences = pp_train_sentences[500:]
+      pp_ngrams_3_train = prepare_ngram_data(pp_train_sentences, pp_word_to_index_ffnn_N_gram_, args.n_gram)
+      pp_ngrams_3_val = prepare_ngram_data(pp_val_sentences, pp_word_to_index_ffnn_N_gram_, args.n_gram)
 
+      
       train_dataset_ffnn_N_gram_pp = NgramDataset(pp_ngrams_3_train)
       val_dataset_ffnn_N_gram_pp = NgramDataset(pp_ngrams_3_val)
+      
+      train_loader_ffnn_N_gram_pp = DataLoader(train_dataset_ffnn_N_gram_pp, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2)
+      val_loader_ffnn_N_gram_pp = DataLoader(val_dataset_ffnn_N_gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2)
+      
+      # Prepare test data loader
+      pp_ngrams_3_test = prepare_ngram_data(pp_test_sentences, pp_word_to_index_ffnn_N_gram_, args.n_gram)
       test_dataset_ffnn_N_gram_pp = NgramDataset(pp_ngrams_3_test)
-      train_loader_ffnn_N_gram_pp = DataLoader(train_dataset_ffnn_N_gram_pp, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=2) # Optimized DataLoader
-      val_loader_ffnn_N_gram_pp = DataLoader(val_dataset_ffnn_N_gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
-      test_loader_ffnn_N_gram_pp = DataLoader(test_dataset_ffnn_N_gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2) # Optimized DataLoader
-      trained_pp_ffnn_N_gram_model = train_model(pp_ffnn_N_gram_model, train_loader_ffnn_N_gram_pp, val_loader_ffnn_N_gram_pp, epochs_final_train, model_type='ffnn', model_name = f"ffnn_{args.n_gram}-gram", learning_rate=ffnn_N_gram_best_params['learning_rate'], patience=3)
-    
-    #   When only execute the FNNN model, the following code will be executed
-    #   plot_loss_curves(trained_pp_ffnn_N_gram_model.train_losses, trained_pp_ffnn_N_gram_model.val_losses, f"ffnn_{args.n_gram}-gram", args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
-    #   pp_test_perplexity_ffnn_N_gram_ = calculate_perplexity(trained_pp_ffnn_N_gram_model, test_loader_ffnn_N_gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn', device=device)
-    #   pp_train_perplexity_ffnn_N_gram_ = calculate_perplexity(trained_pp_ffnn_N_gram_model, train_loader_ffnn_N_gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn', device=device)
-    #   print(f"{os.path.basename(args.corpus_path)} FFNN ({args.n_gram}-gram) - Best Params {ffnn_N_gram_best_params}")
-    #   print(f"{os.path.basename(args.corpus_path)} FFNN ({args.n_gram}-gram) - Test Perplexity: {pp_test_perplexity_ffnn_N_gram_:.4f}")
-    #   print(f"{os.path.basename(args.corpus_path)} FFNN ({args.n_gram}-gram) - Train Perplexity: {pp_train_perplexity_ffnn_N_gram_:.4f}")
+      test_loader_ffnn_N_gram_pp = DataLoader(test_dataset_ffnn_N_gram_pp, batch_size=batch_size, pin_memory=True, num_workers=2)
 
-    # --- RNN ---
+      trained_pp_ffnn_N_gram_model = train_model(pp_ffnn_N_gram_model, train_loader_ffnn_N_gram_pp, val_loader_ffnn_N_gram_pp, epochs_final_train, model_type='ffnn', model_name = f"ffnn_{args.n_gram}-gram", learning_rate=ffnn_N_gram_best_params['learning_rate'], patience=3, device=device, multi_gpu=multi_gpu, vocab=pp_vocab_ffnn_N_gram_, word_to_index=pp_word_to_index_ffnn_N_gram_, best_params=ffnn_N_gram_best_params, n_gram = args.n_gram, args = args, train_sentences = pp_train_sentences, test_sentences = pp_test_sentences)
+    
+    
     elif args.lm_type == 'rnn':
       rnn_best_params, pp_vocab_rnn, pp_word_to_index_rnn = tune_hyperparameters(
-          pride_prejudice_path, 'rnn', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna, seed = SEED)
-      pp_rnn_model = RNNLM(len(pp_vocab_rnn), rnn_best_params['embedding_dim'], rnn_best_params['hidden_dim'], dropout_prob=rnn_best_params['dropout_prob'], num_layers = rnn_best_params['num_rnn_layers'] if 'num_rnn_layers' in rnn_best_params else 2)
+          pride_prejudice_path, 'rnn', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna, seed = SEED, args = args)
+      pp_rnn_model = RNNLM(len(pp_vocab_rnn), rnn_best_params['embedding_dim'], rnn_best_params['hidden_dim'], dropout_prob=rnn_best_params['dropout_prob'], num_layers = rnn_best_params['num_rnn_layers'] if 'num_rnn_layers' in rnn_best_params else 2).to(device)
       pp_text = load_data(args.corpus_path)
       pp_sentences = preprocess_text(pp_text)
-      pp_train_sentences, pp_val_sentences, pp_test_sentences = create_train_test_split(pp_sentences, seed = SEED)
-      pp_rnn_sequences_train = prepare_rnn_data(pp_train_sentences[: -1000], pp_word_to_index_rnn)
+      pp_train_sentences, pp_test_sentences = create_train_test_split(pp_sentences, test_size = 1000, seed=SEED)
+      pp_val_sentences = pp_train_sentences[:500]
+      pp_train_sentences = pp_train_sentences[500:]
+      pp_rnn_sequences_train = prepare_rnn_data(pp_train_sentences, pp_word_to_index_rnn)
       pp_rnn_sequences_val = prepare_rnn_data(pp_val_sentences, pp_word_to_index_rnn)
-      pp_rnn_sequences_test = prepare_rnn_data(pp_test_sentences, pp_word_to_index_rnn)
+      
       train_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_train)
       val_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_val)
-      test_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_test)
+
       train_loader_rnn_pp = DataLoader(train_dataset_rnn_pp, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
       val_loader_rnn_pp = DataLoader(val_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-      test_loader_rnn_pp = DataLoader(test_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-      trained_pp_rnn_model = train_model(pp_rnn_model, train_loader_rnn_pp, val_loader_rnn_pp, epochs_final_train, model_type='rnn', model_name='rnn', learning_rate=rnn_best_params['learning_rate'], patience=3)
-    
-    #   When only execute the RNN model, the following code will be executed
-    #   pp_test_perplexity_rnn = calculate_perplexity(trained_pp_rnn_model, test_loader_rnn_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='rnn', device=device)
-    #   pp_train_perplexity_rnn = calculate_perplexity(trained_pp_rnn_model, train_loader_rnn_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='rnn', device=device)
-    #   plot_loss_curves(trained_pp_rnn_model.train_losses, trained_pp_rnn_model.val_losses, 'rnn', args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
-    #   print(f"{os.path.basename(args.corpus_path)} RNN - Best Params {rnn_best_params}")
-    #   print(f"{os.path.basename(args.corpus_path)} RNN - Test Perplexity: {pp_test_perplexity_rnn:.4f}")
-    #   print(f"{os.path.basename(args.corpus_path)} RNN - Train Perplexity: {pp_train_perplexity_rnn:.4f}")
-      
+      # Prepare test data loader
+      pp_rnn_sequences_test = prepare_rnn_data(pp_test_sentences, pp_word_to_index_rnn)
+      test_dataset_rnn_pp = RNNSequenceDataset(pp_rnn_sequences_test)
+      test_loader_rnn_pp = DataLoader(test_dataset_rnn_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2)
+
+      trained_pp_rnn_model = train_model(pp_rnn_model, train_loader_rnn_pp, val_loader_rnn_pp, epochs_final_train, model_type='rnn', model_name='rnn', learning_rate=rnn_best_params['learning_rate'], patience=3, device=device, multi_gpu=multi_gpu, vocab = pp_vocab_rnn, word_to_index=pp_word_to_index_rnn, best_params=rnn_best_params, args = args, train_sentences = pp_train_sentences, test_sentences = pp_test_sentences)
 
     elif args.lm_type == 'lstm':
         lstm_best_params, pp_vocab_lstm, pp_word_to_index_lstm = tune_hyperparameters(
-            pride_prejudice_path, 'lstm', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna, seed=SEED)
+            pride_prejudice_path, 'lstm', prepare_rnn_data, RNNSequenceDataset, collate_fn=collate_fn_rnn, n_trials=n_trials_optuna, seed=SEED, args = args)
         # --- LSTM ---
-        pp_lstm_model = LSTMLM(len(pp_vocab_lstm), lstm_best_params['embedding_dim'], lstm_best_params['hidden_dim'], dropout_prob=lstm_best_params['dropout_prob'], num_layers=lstm_best_params['num_rnn_layers'] if 'num_rnn_layers' in lstm_best_params else 2)
+        pp_lstm_model = LSTMLM(len(pp_vocab_lstm), lstm_best_params['embedding_dim'], lstm_best_params['hidden_dim'], dropout_prob=lstm_best_params['dropout_prob'], num_layers=lstm_best_params['num_rnn_layers'] if 'num_rnn_layers' in lstm_best_params else 2).to(device)
         pp_text = load_data(args.corpus_path)
         pp_sentences = preprocess_text(pp_text)
-        pp_train_sentences, pp_val_sentences, pp_test_sentences = create_train_test_split(pp_sentences, seed=SEED)
-        pp_rnn_sequences_train = prepare_rnn_data(pp_train_sentences[: -1000], pp_word_to_index_lstm)
+        pp_train_sentences, pp_test_sentences = create_train_test_split(pp_sentences, test_size = 1000, seed=SEED)
+        pp_val_sentences = pp_train_sentences[:500]
+        pp_train_sentences = pp_train_sentences[500:]
+        pp_rnn_sequences_train = prepare_rnn_data(pp_train_sentences, pp_word_to_index_lstm)
         pp_rnn_sequences_val = prepare_rnn_data(pp_val_sentences, pp_word_to_index_lstm)
-        pp_rnn_sequences_test = prepare_rnn_data(pp_test_sentences, pp_word_to_index_lstm)
+        
         train_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_train)
         val_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_val)
-        test_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_test)
+
         train_loader_lstm_pp = DataLoader(train_dataset_lstm_pp, batch_size=batch_size, shuffle=True, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
         val_loader_lstm_pp = DataLoader(val_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-        test_loader_lstm_pp = DataLoader(test_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2) # Optimized DataLoader
-        trained_pp_lstm_model = train_model(pp_lstm_model, train_loader_lstm_pp, val_loader_lstm_pp, epochs_final_train, model_type='lstm', model_name='lstm', learning_rate=lstm_best_params['learning_rate'], patience=3)
-        
-        #   When only execute the LSTM model, the following code will be executed
-        #   pp_test_perplexity_lstm = calculate_perplexity(trained_pp_lstm_model, test_loader_lstm_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='lstm', device=device)
-        #   pp_train_perplexity_lstm = calculate_perplexity(trained_pp_lstm_model, train_loader_lstm_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='lstm', device=device)
-        #   plot_loss_curves(trained_pp_lstm_model.train_losses, trained_pp_lstm_model.val_losses, 'lstm', args.model_dir, os.path.basename(args.corpus_path).split('.')[0])
-        #   print(f"{os.path.basename(args.corpus_path)} LSTM - Best Params {lstm_best_params}")
-        #   print(f"{os.path.basename(args.corpus_path)} LSTM - Test Perplexity: {pp_test_perplexity_lstm:.4f}")
-        #   print(f"{os.path.basename(args.corpus_path)} LSTM - Train Perplexity: {pp_train_perplexity_lstm:.4f}")
+         # Prepare test data loader
+        pp_rnn_sequences_test = prepare_rnn_data(pp_test_sentences, pp_word_to_index_lstm)
+        test_dataset_lstm_pp = RNNSequenceDataset(pp_rnn_sequences_test)
+        test_loader_lstm_pp = DataLoader(test_dataset_lstm_pp, batch_size=batch_size, collate_fn=collate_fn_rnn, pin_memory=True, num_workers=2)
 
-    # --- Final Training and Evaluation ---    
+        trained_pp_lstm_model = train_model(pp_lstm_model, train_loader_lstm_pp, val_loader_lstm_pp, epochs_final_train, model_type='lstm', model_name='lstm', learning_rate=lstm_best_params['learning_rate'], patience=3, device=device, multi_gpu=multi_gpu, vocab = pp_vocab_lstm, word_to_index = pp_word_to_index_lstm, best_params = lstm_best_params, args = args, train_sentences = pp_train_sentences, test_sentences = pp_test_sentences)
+
+# --- Final Training and Evaluation ---    
     if args.lm_type == 'ffnn':
         pp_test_perplexity_ffnn_N_gram_ = calculate_perplexity(trained_pp_ffnn_N_gram_model, test_loader_ffnn_N_gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn', device=device)
         pp_train_perplexity_ffnn_N_gram_ = calculate_perplexity(trained_pp_ffnn_N_gram_model, train_loader_ffnn_N_gram_pp, nn.NLLLoss(reduction='mean', ignore_index=0), model_type='ffnn', device=device)
@@ -518,5 +643,3 @@ if __name__ == '__main__':
         print(f"{os.path.basename(args.corpus_path)} LSTM - Best Params {lstm_best_params}")
         print(f"{os.path.basename(args.corpus_path)} LSTM - Test Perplexity: {pp_test_perplexity_lstm:.4f}")
         print(f"{os.path.basename(args.corpus_path)} LSTM - Train Perplexity: {pp_train_perplexity_lstm:.4f}")
-      
-    
