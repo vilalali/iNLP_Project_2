@@ -116,7 +116,7 @@ class RNNSequenceDataset(Dataset):
 # --- 4. Model Definitions ---
 
 class FFNNLM(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, context_size, hidden_dim, dropout_prob=0.2):
+    def __init__(self, vocab_size, embedding_dim, context_size, hidden_dim, dropout_prob):
         super(FFNNLM, self).__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=0)
         self.embedding_norm = nn.LayerNorm(embedding_dim)
@@ -518,19 +518,33 @@ def tune_hyperparameters(text_path, model_type, data_preparation_func, dataset_c
 if __name__ == '__main__':
     # --- Data Loading and Preprocessing ---
     parser = argparse.ArgumentParser(description="Train Neural Language Model")
-    parser.add_argument("--lm_type", type=str, required = True, choices=["ffnn", "rnn", "lstm"], help = "Type of language model to train")
+    
+    parser.add_argument("--lm_type", type=str, required=True, choices=["ffnn", "rnn", "lstm"], help="Type of language model to train")
     parser.add_argument("--corpus_path", type=str, required=True, help="Path to the corpus")
-    parser.add_argument("--epochs", type = int, default = 10, help = "Number of epochs")
-    parser.add_argument("--embedding_dim", type = int, default = 100, help = "Embedding dimension")
-    parser.add_argument("--hidden_dim", type = int, default = 256, help = "Hidden dimension")
-    parser.add_argument("--batch_size", type = int, default = 128, help = "Batch Size")
-    parser.add_argument("--seq_len", type = int, default = 20, help = "Sequence Length for RNN and LSTM")
-    parser.add_argument("--n_gram", type = int, default = 3, help = "N gram size for FFNN model")
-    parser.add_argument("--min_freq", type = int, default = 1, help = "Minimum frequency for vocab")
-    parser.add_argument("--lr", type = float, default = 0.001, help = "Learning rate")
-    parser.add_argument("--model_dir", type = str, default = "./models", help = "Directory to save models")
-    parser.add_argument("--output_dir", type=str, default="./output", help = "Directory to save output files")
+    
+    # Optimized Hyperparameters
+    parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
+    parser.add_argument("--embedding_dim", type=int, default=70, help="Embedding dimension (was 100, optimized for generalization)")
+    parser.add_argument("--hidden_dim", type=int, default=150, help="Hidden dimension (was 256, optimized to prevent overfitting)")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch Size (was 128, smaller batches for more stable training)")
+    parser.add_argument("--seq_len", type=int, default=20, help="Sequence Length for RNN and LSTM")
+    parser.add_argument("--n_gram", type=int, default=3, help="N-gram size for FFNN model")
+    parser.add_argument("--min_freq", type=int, default=2, help="Minimum frequency for vocab (was 1, filtering rare words helps generalization)")
+    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate (adjusted for better convergence)")
+
+    # Regularization and Optimization
+    parser.add_argument("--dropout", type=float, default=1.2, help="Dropout probability (increased for better regularization)")
+    parser.add_argument("--weight_decay", type=float, default=1e-5, help="L2 regularization (helps prevent overfitting)")
+    
+    # Model and Output Directories
+    parser.add_argument("--model_dir", type=str, default="./models", help="Directory to save models")
+    parser.add_argument("--output_dir", type=str, default="./output", help="Directory to save output files")
     parser.add_argument("--student_id", type=str, required=True, help="Your student ID for file naming")
+
+    # Early Stopping
+    parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping (prevents overtraining)")
+
+
 
     args = parser.parse_args()
 
