@@ -524,16 +524,16 @@ if __name__ == '__main__':
     
     # Optimized Hyperparameters
     parser.add_argument("--epochs", type=int, default=50, help="Number of epochs")
-    parser.add_argument("--embedding_dim", type=int, default=80, help="Embedding dimension (was 100, optimized for generalization)")
-    parser.add_argument("--hidden_dim", type=int, default=150, help="Hidden dimension (was 256, optimized to prevent overfitting)")
+    parser.add_argument("--embedding_dim", type=int, default=70, help="Embedding dimension (was 100, optimized for generalization)")
+    parser.add_argument("--hidden_dim", type=int, default=250, help="Hidden dimension (was 256, optimized to prevent overfitting)")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch Size (was 128, smaller batches for more stable training)")
     parser.add_argument("--seq_len", type=int, default=20, help="Sequence Length for RNN and LSTM")
     parser.add_argument("--n_gram", type=int, default=3, help="N-gram size for FFNN model")
     parser.add_argument("--min_freq", type=int, default=4, help="Minimum frequency for vocab (was 1, filtering rare words helps generalization)")
-    parser.add_argument("--lr", type=float, default=0.005, help="Learning rate (adjusted for better convergence)")
+    parser.add_argument("--lr", type=float, default=0.004, help="Learning rate (adjusted for better convergence)")
 
     # Regularization and Optimization
-    parser.add_argument("--dropout", type=float, default=2.4, help="Dropout probability (increased for better regularization)")
+    parser.add_argument("--dropout", type=float, default=1.2, help="Dropout probability (increased for better regularization)")
     parser.add_argument("--weight_decay", type=float, default=1e-5, help="L2 regularization (helps prevent overfitting)")
     
     # Model and Output Directories
