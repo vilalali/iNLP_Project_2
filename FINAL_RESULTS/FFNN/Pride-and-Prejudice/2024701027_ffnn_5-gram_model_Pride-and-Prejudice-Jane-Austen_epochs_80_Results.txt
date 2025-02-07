@@ -1,0 +1,4 @@
+epochs-80
+Pride-and-Prejudice-Jane-Austen.txt FFNN (5-gram) - Best Params {'embedding_dim': 57, 'hidden_dim': 159, 'learning_rate': 0.015976867981587727, 'dropout_prob': 0.3272865751664279}
+Pride-and-Prejudice-Jane-Austen.txt FFNN (5-gram) - Test Perplexity: 301.5494
+Pride-and-Prejudice-Jane-Austen.txt FFNN (5-gram) - Train Perplexity: 82.0373

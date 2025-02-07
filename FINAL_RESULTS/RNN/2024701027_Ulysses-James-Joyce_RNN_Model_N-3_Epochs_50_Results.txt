@@ -1,0 +1,4 @@
+Ulysses-James-Joyce.txt RNN - Best Params {'embedding_dim': 19, 'hidden_dim': 133, 'learning_rate': 0.0005264328345955168, 'dropout_prob': 0.2559124909193148, 'num_rnn_layers': 1}
+Ulysses-James-Joyce.txt RNN - Test Perplexity: 2533.1509
+Ulysses-James-Joyce.txt RNN - Train Perplexity: 1558.8470
+python src/train.py --lm_type rnn --corpus_path data/Ulysses-James-Joyce.txt   1936.80s user 76.19s system 115% cpu 28:58.08 total
